@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { Link } from "react-router-dom"
 import { supabase } from "../lib/supabaseClient"
 
@@ -21,6 +21,13 @@ const ALLOWED_EXTENSIONS = [
   "ppt",
   "pptx",
   "txt",
+  "py",
+  "sql",
+  "java",
+  "c",
+  "cpp",
+  "js",
+  "pkt",
 ]
 
 function formatFileSize(bytes) {
@@ -47,9 +54,12 @@ function formatDate(dateString) {
   })
 }
 
+function getExtension(fileName = "") {
+  return fileName.split(".").pop()?.toLowerCase() || ""
+}
+
 function getFileIcon(mimeType, fileName = "") {
-  const extension =
-    fileName.split(".").pop()?.toLowerCase() || ""
+  const extension = getExtension(fileName)
 
   if (mimeType === "application/pdf" || extension === "pdf") {
     return "📕"
@@ -72,11 +82,140 @@ function getFileIcon(mimeType, fileName = "") {
     return "📙"
   }
 
-  if (mimeType === "text/plain" || extension === "txt") {
+  if (
+    mimeType === "text/plain" ||
+    ["txt", "py", "sql", "java", "c", "cpp", "js"].includes(extension)
+  ) {
     return "📄"
   }
 
+  if (extension === "pkt") {
+    return "🌐"
+  }
+
   return "📁"
+}
+
+function cleanTitle(fileName = "") {
+  return fileName
+    .replace(/\.[^/.]+$/, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+function detectSubject(file) {
+  const relativePath = file.webkitRelativePath || ""
+
+  const parts = relativePath
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean)
+
+  if (parts.length < 2) {
+    return ""
+  }
+
+  const ignored = new Set([
+    "bca",
+    "bca general",
+    "semester",
+    "3rd semester",
+    "third semester",
+    "iii",
+    "resources",
+    "resource library",
+    "notes",
+    "note",
+    "lab",
+    "labs",
+    "practical",
+    "practicals",
+    "question paper",
+    "question papers",
+    "pyq",
+    "assignment",
+    "assignments",
+    "ppt",
+    "ppts",
+    "presentation",
+    "presentations",
+    "slides",
+    "textbook",
+    "textbooks",
+    "unit 1",
+    "unit 2",
+    "unit 3",
+    "unit 4",
+  ])
+
+  const folderParts = parts.slice(0, -1)
+
+  const subjectFolder = folderParts.find((folder) => {
+    const normalized = folder
+      .toLowerCase()
+      .replace(/[_-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+
+    return !ignored.has(normalized)
+  })
+
+  return subjectFolder || ""
+}
+
+function detectResourceType(file) {
+  const path = (file.webkitRelativePath || "").toLowerCase()
+
+  if (
+    path.includes("question paper") ||
+    path.includes("question-papers") ||
+    path.includes("pyq")
+  ) {
+    return "Question Paper"
+  }
+
+  if (path.includes("lab") || path.includes("practical")) {
+    return "Lab Manual"
+  }
+
+  if (
+    path.includes("ppt") ||
+    path.includes("presentation") ||
+    path.includes("slides")
+  ) {
+    return "PPT"
+  }
+
+  if (path.includes("assignment")) {
+    return "Assignment"
+  }
+
+  if (path.includes("textbook") || path.includes("book")) {
+    return "Textbook"
+  }
+
+  return "Notes"
+}
+
+function getMimeType(file) {
+  const types = {
+    pdf: "application/pdf",
+    doc: "application/msword",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ppt: "application/vnd.ms-powerpoint",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    txt: "text/plain",
+    py: "text/x-python",
+    sql: "application/sql",
+    java: "text/x-java-source",
+    c: "text/x-c",
+    cpp: "text/x-c++src",
+    js: "text/javascript",
+    pkt: "application/octet-stream",
+  }
+
+  return file.type || types[getExtension(file.name)] || "application/octet-stream"
 }
 
 function Resources() {
@@ -92,14 +231,21 @@ function Resources() {
 
   const [showUpload, setShowUpload] = useState(false)
 
-  const [title, setTitle] = useState("")
-  const [description, setDescription] = useState("")
-  const [subject, setSubject] = useState("")
+  const [files, setFiles] = useState([])
+  const [defaultSubject, setDefaultSubject] = useState("")
   const [resourceType, setResourceType] = useState("Notes")
-  const [file, setFile] = useState(null)
+  const [description, setDescription] = useState("")
+
+  const [uploadProgress, setUploadProgress] = useState({
+    completed: 0,
+    total: 0,
+  })
 
   const [error, setError] = useState("")
   const [message, setMessage] = useState("")
+
+  const fileInputRef = useRef(null)
+  const folderInputRef = useRef(null)
 
   const loadResources = async () => {
     setLoading(true)
@@ -164,182 +310,242 @@ function Resources() {
         typeFilter === "All" ||
         resource.resource_type === typeFilter
 
-      return (
-        matchesSearch &&
-        matchesSubject &&
-        matchesType
-      )
+      return matchesSearch && matchesSubject && matchesType
     })
-  }, [
-    resources,
-    search,
-    subjectFilter,
-    typeFilter,
-  ])
+  }, [resources, search, subjectFilter, typeFilter])
 
-  const resetUploadForm = () => {
-    setTitle("")
-    setDescription("")
-    setSubject("")
-    setResourceType("Notes")
-    setFile(null)
-  }
-
-  const handleFileChange = (event) => {
+  const addFiles = (fileList) => {
     setError("")
     setMessage("")
 
-    const selectedFile = event.target.files?.[0]
+    const incomingFiles = Array.from(fileList || [])
+    const validFiles = []
+    const rejectedFiles = []
 
-    if (!selectedFile) {
-      setFile(null)
-      return
-    }
+    incomingFiles.forEach((file) => {
+      const extension = getExtension(file.name)
 
-    if (selectedFile.size > MAX_FILE_SIZE) {
-      setError("File must be 10 MB or smaller.")
-      event.target.value = ""
-      setFile(null)
-      return
-    }
+      if (!ALLOWED_EXTENSIONS.includes(extension)) {
+        rejectedFiles.push(`${file.name}: unsupported file type`)
+        return
+      }
 
-    const extension = selectedFile.name
-      .split(".")
-      .pop()
-      ?.toLowerCase()
+      if (file.size > MAX_FILE_SIZE) {
+        rejectedFiles.push(`${file.name}: larger than 10 MB`)
+        return
+      }
 
-    if (
-      !extension ||
-      !ALLOWED_EXTENSIONS.includes(extension)
-    ) {
-      setError(
-        "Allowed files: PDF, DOC, DOCX, PPT, PPTX and TXT."
+      validFiles.push(file)
+    })
+
+    setFiles((currentFiles) => {
+      const keys = new Set(
+        currentFiles.map(
+          (file) =>
+            `${file.webkitRelativePath || file.name}-${file.size}-${file.lastModified}`
+        )
       )
-      event.target.value = ""
-      setFile(null)
-      return
-    }
 
-    setFile(selectedFile)
+      const next = [...currentFiles]
+
+      validFiles.forEach((file) => {
+        const key = `${file.webkitRelativePath || file.name}-${file.size}-${file.lastModified}`
+
+        if (!keys.has(key)) {
+          keys.add(key)
+          next.push(file)
+        }
+      })
+
+      return next
+    })
+
+    if (rejectedFiles.length > 0) {
+      setError(
+        `${rejectedFiles.length} file(s) skipped: ${rejectedFiles
+          .slice(0, 4)
+          .join(", ")}${rejectedFiles.length > 4 ? " ..." : ""}`
+      )
+    }
   }
 
-  const handleUpload = async (event) => {
+  const handleFileChange = (event) => {
+    addFiles(event.target.files)
+    event.target.value = ""
+  }
+
+  const removeFile = (indexToRemove) => {
+    setFiles((currentFiles) =>
+      currentFiles.filter((_, index) => index !== indexToRemove)
+    )
+  }
+
+  const resetUploadForm = () => {
+    setFiles([])
+    setDefaultSubject("")
+    setResourceType("Notes")
+    setDescription("")
+    setUploadProgress({
+      completed: 0,
+      total: 0,
+    })
+  }
+
+  const handleBulkUpload = async (event) => {
     event.preventDefault()
 
     setError("")
     setMessage("")
 
     if (!user) {
-      setError("Please log in before uploading a resource.")
+      setError("Please log in before uploading resources.")
       return
     }
 
-    if (!title.trim()) {
-      setError("Please enter a resource title.")
-      return
-    }
-
-    if (!subject.trim()) {
-      setError("Please enter the subject.")
-      return
-    }
-
-    if (!file) {
-      setError("Please select a file.")
-      return
-    }
-
-    if (file.size > MAX_FILE_SIZE) {
-      setError("File must be 10 MB or smaller.")
-      return
-    }
-
-    const extension = file.name
-      .split(".")
-      .pop()
-      ?.toLowerCase()
-
-    if (
-      !extension ||
-      !ALLOWED_EXTENSIONS.includes(extension)
-    ) {
-      setError(
-        "Allowed files: PDF, DOC, DOCX, PPT, PPTX and TXT."
-      )
+    if (files.length === 0) {
+      setError("Select at least one file.")
       return
     }
 
     setUploading(true)
+    setUploadProgress({
+      completed: 0,
+      total: files.length,
+    })
 
-    let uploadedPath = ""
+    const successfulResources = []
+    const failedFiles = []
 
     try {
-      const safeFileName = file.name
-        .replace(/[^a-zA-Z0-9._-]/g, "_")
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index]
 
-      uploadedPath = `${user.id}/${crypto.randomUUID()}-${safeFileName}`
+        const subject =
+          defaultSubject.trim() || detectSubject(file)
 
-      const {
-        error: uploadError,
-      } = await supabase.storage
-        .from("resource-files")
-        .upload(uploadedPath, file, {
-          cacheControl: "3600",
-          upsert: false,
-          contentType: file.type || undefined,
-        })
+        if (!subject.trim()) {
+          failedFiles.push({
+            file,
+            reason:
+              "Subject not detected. Enter a default subject and retry.",
+          })
+          continue
+        }
 
-      if (uploadError) {
-        throw uploadError
-      }
+        const detectedType =
+          detectResourceType(file) || resourceType
 
-      const {
-        data: insertedResource,
-        error: insertError,
-      } = await supabase
-        .from("resources")
-        .insert({
-          user_id: user.id,
-          title: title.trim(),
-          description: description.trim(),
-          subject: subject.trim(),
-          resource_type: resourceType,
-          file_name: file.name,
-          file_path: uploadedPath,
-          file_size: file.size,
-          mime_type: file.type || "application/octet-stream",
-          downloads: 0,
-        })
-        .select(
-          "id, user_id, title, description, subject, resource_type, file_name, file_size, mime_type, downloads, created_at"
+        const safeFileName = file.name.replace(
+          /[^a-zA-Z0-9._-]/g,
+          "_"
         )
-        .single()
 
-      if (insertError) {
-        await supabase.storage
-          .from("resource-files")
-          .remove([uploadedPath])
+        const filePath = `${user.id}/${crypto.randomUUID()}-${safeFileName}`
 
-        throw insertError
+        setUploadProgress({
+          completed: index,
+          total: files.length,
+        })
+
+        try {
+          const { error: uploadError } = await supabase.storage
+            .from("resource-files")
+            .upload(filePath, file, {
+              cacheControl: "3600",
+              upsert: false,
+              contentType: getMimeType(file),
+            })
+
+          if (uploadError) {
+            throw uploadError
+          }
+
+          const {
+            data: insertedResource,
+            error: insertError,
+          } = await supabase
+            .from("resources")
+            .insert({
+              user_id: user.id,
+              title: cleanTitle(file.name),
+              description: description.trim(),
+              subject: subject.trim(),
+              resource_type: detectedType,
+              file_name: file.name,
+              file_path: filePath,
+              file_size: file.size,
+              mime_type: getMimeType(file),
+              downloads: 0,
+            })
+            .select(
+              "id, user_id, title, description, subject, resource_type, file_name, file_size, mime_type, downloads, created_at"
+            )
+            .single()
+
+          if (insertError) {
+            await supabase.storage
+              .from("resource-files")
+              .remove([filePath])
+
+            throw insertError
+          }
+
+          successfulResources.push(insertedResource)
+        } catch (fileError) {
+          console.error(
+            `Unable to upload ${file.name}:`,
+            fileError
+          )
+
+          failedFiles.push({
+            file,
+            reason:
+              fileError?.message || "Upload failed.",
+          })
+        }
+
+        setUploadProgress({
+          completed: index + 1,
+          total: files.length,
+        })
       }
 
-      setResources((current) => [
-        insertedResource,
-        ...current,
-      ])
+      if (successfulResources.length > 0) {
+        setResources((current) => [
+          ...successfulResources,
+          ...current,
+        ])
+      }
 
-      resetUploadForm()
-      setShowUpload(false)
-      setMessage("Resource uploaded successfully.")
-    } catch (uploadError) {
-      console.error(
-        "Unable to upload resource:",
-        uploadError
-      )
+      if (failedFiles.length === 0) {
+        setMessage(
+          `${successfulResources.length} resource(s) uploaded successfully.`
+        )
+        resetUploadForm()
+        setShowUpload(false)
+      } else {
+        setFiles(failedFiles.map((item) => item.file))
+
+        setMessage(
+          `${successfulResources.length} uploaded. ${failedFiles.length} file(s) remain selected for retry.`
+        )
+
+        setError(
+          failedFiles
+            .slice(0, 5)
+            .map(
+              (item) =>
+                `${item.file.name}: ${item.reason}`
+            )
+            .join(" | ")
+        )
+      }
+    } catch (bulkError) {
+      console.error("Bulk upload failed:", bulkError)
 
       setError(
-        uploadError?.message ||
-          "Unable to upload the resource."
+        bulkError?.message ||
+          "Unable to upload the resources."
       )
     } finally {
       setUploading(false)
@@ -365,9 +571,6 @@ function Resources() {
   return (
     <main className="min-h-[calc(100vh-80px)] bg-zinc-950 px-4 py-8 text-white sm:px-6 lg:px-8">
       <div className="mx-auto max-w-7xl">
-
-        {/* Header */}
-
         <section className="mb-8">
           <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
             <div>
@@ -380,8 +583,8 @@ function Resources() {
               </h1>
 
               <p className="mt-3 max-w-2xl text-zinc-400">
-                Find notes, question papers, lab manuals and study
-                material shared by students.
+                Find notes, question papers, lab manuals and study material
+                shared by students.
               </p>
             </div>
 
@@ -396,8 +599,8 @@ function Resources() {
                 className="rounded-2xl bg-violet-500 px-5 py-3 text-sm font-bold text-white transition hover:bg-violet-400"
               >
                 {showUpload
-                  ? "✕ Close Upload"
-                  : "＋ Upload Resource"}
+                  ? "✕ Close Bulk Upload"
+                  : "＋ Bulk Upload"}
               </button>
             ) : (
               <Link
@@ -410,10 +613,8 @@ function Resources() {
           </div>
         </section>
 
-        {/* Messages */}
-
         {(error || message) && (
-          <section className="mb-6">
+          <section className="mb-6 space-y-3">
             {error && (
               <div className="rounded-2xl border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-300">
                 {error}
@@ -428,132 +629,264 @@ function Resources() {
           </section>
         )}
 
-        {/* Upload form */}
-
         {showUpload && user && (
           <section className="mb-8 rounded-[2rem] border border-violet-500/20 bg-violet-500/5 p-5 sm:p-7">
             <div className="mb-6">
               <p className="text-xs font-bold uppercase tracking-[0.2em] text-violet-400">
-                Share with students
+                Fast upload
               </p>
 
               <h2 className="mt-2 text-2xl font-black">
-                Upload a Resource
+                Upload multiple resources at once
               </h2>
 
-              <p className="mt-2 text-sm leading-6 text-zinc-500">
-                Maximum file size is 10 MB. Supported formats:
-                PDF, DOC, DOCX, PPT, PPTX and TXT.
+              <p className="mt-2 max-w-3xl text-sm leading-6 text-zinc-500">
+                Select many files or an entire folder. StudentHub will detect
+                the subject from folder names where possible.
               </p>
             </div>
 
-            <form
-              onSubmit={handleUpload}
-              className="grid gap-5 lg:grid-cols-2"
-            >
-              <div>
-                <label className="text-sm font-semibold text-zinc-300">
-                  Title
-                </label>
+            <form onSubmit={handleBulkUpload} className="space-y-6">
+              <div className="grid gap-5 lg:grid-cols-3">
+                <div>
+                  <label className="text-sm font-semibold text-zinc-300">
+                    Default Subject
+                  </label>
 
-                <input
-                  type="text"
-                  value={title}
-                  onChange={(event) =>
-                    setTitle(event.target.value)
-                  }
-                  placeholder="Example: Computer Networks Unit 1 Notes"
-                  className="mt-2 w-full rounded-2xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm outline-none transition focus:border-violet-500"
-                />
-              </div>
+                  <input
+                    value={defaultSubject}
+                    onChange={(event) =>
+                      setDefaultSubject(event.target.value)
+                    }
+                    placeholder="Optional — e.g. Database Management System"
+                    className="mt-2 w-full rounded-2xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm outline-none transition focus:border-violet-500"
+                  />
 
-              <div>
-                <label className="text-sm font-semibold text-zinc-300">
-                  Subject
-                </label>
-
-                <input
-                  type="text"
-                  value={subject}
-                  onChange={(event) =>
-                    setSubject(event.target.value)
-                  }
-                  placeholder="Example: Computer Networks"
-                  className="mt-2 w-full rounded-2xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm outline-none transition focus:border-violet-500"
-                />
-              </div>
-
-              <div>
-                <label className="text-sm font-semibold text-zinc-300">
-                  Resource Type
-                </label>
-
-                <select
-                  value={resourceType}
-                  onChange={(event) =>
-                    setResourceType(event.target.value)
-                  }
-                  className="mt-2 w-full rounded-2xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm outline-none focus:border-violet-500"
-                >
-                  {RESOURCE_TYPES.map((type) => (
-                    <option key={type} value={type}>
-                      {type}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="text-sm font-semibold text-zinc-300">
-                  File
-                </label>
-
-                <input
-                  type="file"
-                  accept=".pdf,.doc,.docx,.ppt,.pptx,.txt"
-                  onChange={handleFileChange}
-                  className="mt-2 block w-full rounded-2xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm text-zinc-400 file:mr-4 file:rounded-xl file:border-0 file:bg-violet-500 file:px-4 file:py-2 file:font-bold file:text-white"
-                />
-
-                {file && (
-                  <p className="mt-2 text-xs text-zinc-500">
-                    {file.name} · {formatFileSize(file.size)}
+                  <p className="mt-2 text-xs text-zinc-600">
+                    Use this when all selected files belong to the same subject.
                   </p>
+                </div>
+
+                <div>
+                  <label className="text-sm font-semibold text-zinc-300">
+                    Default Resource Type
+                  </label>
+
+                  <select
+                    value={resourceType}
+                    onChange={(event) =>
+                      setResourceType(event.target.value)
+                    }
+                    className="mt-2 w-full rounded-2xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm outline-none"
+                  >
+                    {RESOURCE_TYPES.map((type) => (
+                      <option key={type} value={type}>
+                        {type}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-sm font-semibold text-zinc-300">
+                    Common Description
+                  </label>
+
+                  <input
+                    value={description}
+                    onChange={(event) =>
+                      setDescription(event.target.value)
+                    }
+                    placeholder="Optional description for all files"
+                    className="mt-2 w-full rounded-2xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm outline-none transition focus:border-violet-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="rounded-2xl border border-zinc-700 bg-zinc-950 px-5 py-4 text-left transition hover:border-violet-500/50"
+                >
+                  <p className="text-lg font-bold">
+                    📄 Select Multiple Files
+                  </p>
+
+                  <p className="mt-1 text-xs text-zinc-500">
+                    Choose many files together.
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => folderInputRef.current?.click()}
+                  className="rounded-2xl border border-violet-500/30 bg-violet-500/5 px-5 py-4 text-left transition hover:bg-violet-500/10"
+                >
+                  <p className="text-lg font-bold">
+                    📁 Select Entire Folder
+                  </p>
+
+                  <p className="mt-1 text-xs text-zinc-500">
+                    Best for your BCA resource folders.
+                  </p>
+                </button>
+
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  accept={ALLOWED_EXTENSIONS.map(
+                    (extension) => `.${extension}`
+                  ).join(",")}
+                  onChange={handleFileChange}
+                  className="hidden"
+                />
+
+                <input
+                  ref={folderInputRef}
+                  type="file"
+                  multiple
+                  webkitdirectory=""
+                  directory=""
+                  onChange={handleFileChange}
+                  className="hidden"
+                />
+              </div>
+
+              <div className="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-4 sm:p-5">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="font-bold">
+                      {files.length} file
+                      {files.length === 1 ? "" : "s"} selected
+                    </p>
+
+                    <p className="mt-1 text-xs text-zinc-600">
+                      Maximum 10 MB per file
+                    </p>
+                  </div>
+
+                  {files.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setFiles([])}
+                      className="text-xs font-bold text-red-400 hover:text-red-300"
+                    >
+                      Clear all
+                    </button>
+                  )}
+                </div>
+
+                {files.length === 0 ? (
+                  <div className="mt-4 rounded-2xl border border-dashed border-zinc-700 p-8 text-center">
+                    <div className="text-4xl">📚</div>
+
+                    <p className="mt-3 text-sm text-zinc-500">
+                      No files selected yet
+                    </p>
+                  </div>
+                ) : (
+                  <div className="mt-4 max-h-96 space-y-2 overflow-auto pr-1">
+                    {files.map((file, index) => {
+                      const detectedSubject =
+                        defaultSubject.trim() ||
+                        detectSubject(file)
+
+                      const detectedType =
+                        detectResourceType(file) ||
+                        resourceType
+
+                      return (
+                        <div
+                          key={`${file.name}-${file.size}-${file.lastModified}-${index}`}
+                          className="rounded-2xl border border-zinc-800 bg-zinc-900/70 p-3"
+                        >
+                          <div className="flex items-start gap-3">
+                            <div className="text-2xl">
+                              {getFileIcon(getMimeType(file), file.name)}
+                            </div>
+
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate text-sm font-semibold">
+                                {file.name}
+                              </p>
+
+                              <p className="mt-1 truncate text-xs text-zinc-600">
+                                {file.webkitRelativePath || file.name}
+                              </p>
+
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                <span className="rounded-full border border-violet-500/20 bg-violet-500/5 px-2 py-1 text-[10px] font-bold text-violet-300">
+                                  {detectedSubject || "Subject needed"}
+                                </span>
+
+                                <span className="rounded-full border border-zinc-700 bg-zinc-950 px-2 py-1 text-[10px] font-bold text-zinc-500">
+                                  {detectedType}
+                                </span>
+
+                                <span className="rounded-full border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-600">
+                                  {formatFileSize(file.size)}
+                                </span>
+                              </div>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => removeFile(index)}
+                              className="rounded-lg px-2 py-1 text-xs text-zinc-600 hover:bg-red-500/10 hover:text-red-300"
+                              aria-label={`Remove ${file.name}`}
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
                 )}
               </div>
 
-              <div className="lg:col-span-2">
-                <label className="text-sm font-semibold text-zinc-300">
-                  Description
-                </label>
+              {uploading && (
+                <div className="rounded-2xl border border-violet-500/20 bg-violet-500/5 p-4">
+                  <div className="flex justify-between gap-3 text-sm">
+                    <span className="font-semibold">
+                      Uploading {uploadProgress.completed}/
+                      {uploadProgress.total}
+                    </span>
+                  </div>
 
-                <textarea
-                  value={description}
-                  onChange={(event) =>
-                    setDescription(event.target.value)
-                  }
-                  rows={4}
-                  placeholder="Add a short description..."
-                  className="mt-2 w-full resize-none rounded-2xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm outline-none transition focus:border-violet-500"
-                />
-              </div>
+                  <div className="mt-3 h-2 overflow-hidden rounded-full bg-zinc-800">
+                    <div
+                      className="h-full bg-violet-500 transition-all"
+                      style={{
+                        width: `${
+                          uploadProgress.total
+                            ? (uploadProgress.completed /
+                                uploadProgress.total) *
+                              100
+                            : 0
+                        }%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
 
-              <div className="lg:col-span-2">
-                <button
-                  type="submit"
-                  disabled={uploading}
-                  className="rounded-2xl bg-white px-6 py-3 font-bold text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {uploading
-                    ? "Uploading..."
-                    : "🚀 Upload Resource"}
-                </button>
-              </div>
+              <button
+                type="submit"
+                disabled={uploading || files.length === 0}
+                className="w-full rounded-2xl bg-white px-6 py-4 font-black text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {uploading
+                  ? "Uploading resources..."
+                  : `🚀 Upload ${files.length} Resource${
+                      files.length === 1 ? "" : "s"
+                    }`}
+              </button>
             </form>
           </section>
         )}
-
-        {/* Search + filters */}
 
         <section className="mb-8 rounded-[2rem] border border-zinc-800 bg-zinc-900/60 p-5 sm:p-6">
           <div className="grid gap-4 lg:grid-cols-[1fr_auto_auto]">
@@ -610,8 +943,6 @@ function Resources() {
           </div>
         </section>
 
-        {/* Resource list */}
-
         {filteredResources.length === 0 ? (
           <section className="rounded-[2rem] border border-dashed border-zinc-700 bg-zinc-900/30 p-12 text-center">
             <div className="text-6xl">📭</div>
@@ -661,17 +992,13 @@ function Resources() {
                 )}
 
                 <div className="mt-5 flex flex-wrap gap-3 text-xs text-zinc-600">
-                  <span>
-                    📄 {resource.file_name}
-                  </span>
+                  <span>📄 {resource.file_name}</span>
 
                   <span>
                     💾 {formatFileSize(resource.file_size)}
                   </span>
 
-                  <span>
-                    ⬇ {resource.downloads || 0}
-                  </span>
+                  <span>⬇ {resource.downloads || 0}</span>
                 </div>
 
                 <div className="mt-5 flex items-center justify-between border-t border-zinc-800 pt-4">
