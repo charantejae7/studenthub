@@ -2,322 +2,370 @@ import { useEffect, useMemo, useState } from "react"
 import { Link } from "react-router-dom"
 import { supabase } from "../lib/supabaseClient"
 
-const DAYS = [
-  "Sunday",
-  "Monday",
-  "Tuesday",
-  "Wednesday",
-  "Thursday",
-  "Friday",
-  "Saturday",
+const RESOURCE_TYPES = [
+  "Notes",
+  "Question Paper",
+  "Lab Manual",
+  "PPT",
+  "Assignment",
+  "Textbook",
+  "Other",
 ]
 
-const MONTHS = [
-  "January",
-  "February",
-  "March",
-  "April",
-  "May",
-  "June",
-  "July",
-  "August",
-  "September",
-  "October",
-  "November",
-  "December",
+const MAX_FILE_SIZE = 10 * 1024 * 1024
+
+const ALLOWED_EXTENSIONS = [
+  "pdf",
+  "doc",
+  "docx",
+  "ppt",
+  "pptx",
+  "txt",
 ]
 
-function formatDateKey(date) {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, "0")
-  const day = String(date.getDate()).padStart(2, "0")
+function formatFileSize(bytes) {
+  if (!bytes) return "Unknown size"
 
-  return `${year}-${month}-${day}`
+  if (bytes < 1024) {
+    return `${bytes} B`
+  }
+
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`
+  }
+
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-function formatTime(time) {
-  if (!time) return "Time not set"
+function formatDate(dateString) {
+  if (!dateString) return "Unknown date"
 
-  const [hours, minutes] = time.split(":")
-  const date = new Date()
-
-  date.setHours(Number(hours))
-  date.setMinutes(Number(minutes))
-  date.setSeconds(0)
-
-  return date.toLocaleTimeString([], {
-    hour: "numeric",
-    minute: "2-digit",
+  return new Date(dateString).toLocaleDateString("en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
   })
 }
 
-function formatTimeRange(start, end) {
-  if (!start) return "Time not set"
+function getFileIcon(mimeType, fileName = "") {
+  const extension =
+    fileName.split(".").pop()?.toLowerCase() || ""
 
-  return `${formatTime(start)}${
-    end ? ` – ${formatTime(end)}` : ""
-  }`
-}
-
-function getPriorityClass(priority) {
-  if (priority === "High") {
-    return "border-red-500/30 bg-red-500/10 text-red-300"
+  if (mimeType === "application/pdf" || extension === "pdf") {
+    return "📕"
   }
 
-  if (priority === "Low") {
-    return "border-zinc-700 bg-zinc-800 text-zinc-400"
+  if (
+    mimeType?.includes("word") ||
+    extension === "doc" ||
+    extension === "docx"
+  ) {
+    return "📘"
   }
 
-  return "border-violet-500/30 bg-violet-500/10 text-violet-300"
+  if (
+    mimeType?.includes("presentation") ||
+    mimeType?.includes("powerpoint") ||
+    extension === "ppt" ||
+    extension === "pptx"
+  ) {
+    return "📙"
+  }
+
+  if (mimeType === "text/plain" || extension === "txt") {
+    return "📄"
+  }
+
+  return "📁"
 }
 
-function Schedule() {
-  const today = new Date()
-
+function Resources() {
   const [user, setUser] = useState(null)
-  const [tasks, setTasks] = useState([])
-
-  const [currentMonth, setCurrentMonth] = useState(
-    new Date(today.getFullYear(), today.getMonth(), 1)
-  )
-
-  const [selectedDate, setSelectedDate] = useState(
-    formatDateKey(today)
-  )
+  const [resources, setResources] = useState([])
 
   const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
+  const [uploading, setUploading] = useState(false)
 
-  const [filter, setFilter] = useState("All")
+  const [search, setSearch] = useState("")
+  const [subjectFilter, setSubjectFilter] = useState("All")
+  const [typeFilter, setTypeFilter] = useState("All")
 
-  const loadSchedule = async () => {
+  const [showUpload, setShowUpload] = useState(false)
+
+  const [title, setTitle] = useState("")
+  const [description, setDescription] = useState("")
+  const [subject, setSubject] = useState("")
+  const [resourceType, setResourceType] = useState("Notes")
+  const [file, setFile] = useState(null)
+
+  const [error, setError] = useState("")
+  const [message, setMessage] = useState("")
+
+  const loadResources = async () => {
     setLoading(true)
+    setError("")
 
     const {
       data: { user: currentUser },
     } = await supabase.auth.getUser()
 
-    if (!currentUser) {
-      setLoading(false)
-      return
-    }
-
     setUser(currentUser)
 
-    const { data, error } = await supabase
-      .from("study_tasks")
-      .select("*")
-      .eq("user_id", currentUser.id)
-      .order("task_date", { ascending: true })
-      .order("start_time", { ascending: true })
-      .order("created_at", { ascending: true })
+    const { data, error: resourceError } = await supabase
+      .from("resources")
+      .select(
+        "id, user_id, title, description, subject, resource_type, file_name, file_size, mime_type, downloads, created_at"
+      )
+      .order("created_at", { ascending: false })
 
-    if (error) {
-      console.error("Failed to load schedule:", error)
-      setTasks([])
+    if (resourceError) {
+      console.error("Unable to load resources:", resourceError)
+      setError(resourceError.message)
+      setResources([])
     } else {
-      setTasks(data || [])
+      setResources(data || [])
     }
 
     setLoading(false)
   }
 
   useEffect(() => {
-    loadSchedule()
+    loadResources()
   }, [])
 
   const subjects = useMemo(() => {
-    const uniqueSubjects = [
-      ...new Set(tasks.map((task) => task.subject).filter(Boolean)),
+    const values = [
+      ...new Set(
+        resources
+          .map((resource) => resource.subject?.trim())
+          .filter(Boolean)
+      ),
     ]
 
-    return uniqueSubjects.sort()
-  }, [tasks])
+    return values.sort((a, b) => a.localeCompare(b))
+  }, [resources])
 
-  const filteredTasks = useMemo(() => {
-    if (filter === "All") return tasks
+  const filteredResources = useMemo(() => {
+    const query = search.trim().toLowerCase()
 
-    return tasks.filter((task) => task.subject === filter)
-  }, [tasks, filter])
+    return resources.filter((resource) => {
+      const matchesSearch =
+        !query ||
+        resource.title?.toLowerCase().includes(query) ||
+        resource.description?.toLowerCase().includes(query) ||
+        resource.subject?.toLowerCase().includes(query) ||
+        resource.file_name?.toLowerCase().includes(query)
 
-  const tasksByDate = useMemo(() => {
-    const grouped = {}
+      const matchesSubject =
+        subjectFilter === "All" ||
+        resource.subject === subjectFilter
 
-    filteredTasks.forEach((task) => {
-      if (!grouped[task.task_date]) {
-        grouped[task.task_date] = []
-      }
+      const matchesType =
+        typeFilter === "All" ||
+        resource.resource_type === typeFilter
 
-      grouped[task.task_date].push(task)
+      return (
+        matchesSearch &&
+        matchesSubject &&
+        matchesType
+      )
     })
+  }, [
+    resources,
+    search,
+    subjectFilter,
+    typeFilter,
+  ])
 
-    return grouped
-  }, [filteredTasks])
-
-  const selectedTasks = tasksByDate[selectedDate] || []
-
-  const selectedCompletedCount = selectedTasks.filter(
-    (task) => task.completed
-  ).length
-
-  const selectedTotalMinutes = selectedTasks.reduce(
-    (sum, task) => sum + Number(task.duration_minutes || 0),
-    0
-  )
-
-  const selectedCompletedMinutes = selectedTasks
-    .filter((task) => task.completed)
-    .reduce(
-      (sum, task) => sum + Number(task.duration_minutes || 0),
-      0
-    )
-
-  const monthPrefix = `${currentMonth.getFullYear()}-${String(
-    currentMonth.getMonth() + 1
-  ).padStart(2, "0")}`
-
-  const monthTasks = filteredTasks.filter((task) =>
-    task.task_date.startsWith(monthPrefix)
-  )
-
-  const monthMinutes = monthTasks.reduce(
-    (sum, task) => sum + Number(task.duration_minutes || 0),
-    0
-  )
-
-  const monthCompletedMinutes = monthTasks
-    .filter((task) => task.completed)
-    .reduce(
-      (sum, task) => sum + Number(task.duration_minutes || 0),
-      0
-    )
-
-  const monthCompletedTasks = monthTasks.filter(
-    (task) => task.completed
-  ).length
-
-  const firstDay = new Date(
-    currentMonth.getFullYear(),
-    currentMonth.getMonth(),
-    1
-  ).getDay()
-
-  const daysInMonth = new Date(
-    currentMonth.getFullYear(),
-    currentMonth.getMonth() + 1,
-    0
-  ).getDate()
-
-  const calendarCells = []
-
-  for (let i = 0; i < firstDay; i += 1) {
-    calendarCells.push(null)
+  const resetUploadForm = () => {
+    setTitle("")
+    setDescription("")
+    setSubject("")
+    setResourceType("Notes")
+    setFile(null)
   }
 
-  for (let day = 1; day <= daysInMonth; day += 1) {
-    calendarCells.push(
-      new Date(
-        currentMonth.getFullYear(),
-        currentMonth.getMonth(),
-        day
-      )
-    )
-  }
+  const handleFileChange = (event) => {
+    setError("")
+    setMessage("")
 
-  const changeMonth = (amount) => {
-    setCurrentMonth(
-      new Date(
-        currentMonth.getFullYear(),
-        currentMonth.getMonth() + amount,
-        1
-      )
-    )
-  }
+    const selectedFile = event.target.files?.[0]
 
-  const goToToday = () => {
-    const now = new Date()
-
-    setCurrentMonth(
-      new Date(now.getFullYear(), now.getMonth(), 1)
-    )
-
-    setSelectedDate(formatDateKey(now))
-  }
-
-  const selectDate = (date) => {
-    setSelectedDate(formatDateKey(date))
-  }
-
-  const toggleTask = async (task) => {
-    setSaving(true)
-
-    const { error } = await supabase
-      .from("study_tasks")
-      .update({
-        completed: !task.completed,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", task.id)
-      .eq("user_id", user?.id)
-
-    if (error) {
-      console.error("Failed to update task:", error)
-      setSaving(false)
+    if (!selectedFile) {
+      setFile(null)
       return
     }
 
-    setTasks((currentTasks) =>
-      currentTasks.map((item) =>
-        item.id === task.id
-          ? {
-              ...item,
-              completed: !item.completed,
-            }
-          : item
-      )
-    )
+    if (selectedFile.size > MAX_FILE_SIZE) {
+      setError("File must be 10 MB or smaller.")
+      event.target.value = ""
+      setFile(null)
+      return
+    }
 
-    setSaving(false)
+    const extension = selectedFile.name
+      .split(".")
+      .pop()
+      ?.toLowerCase()
+
+    if (
+      !extension ||
+      !ALLOWED_EXTENSIONS.includes(extension)
+    ) {
+      setError(
+        "Allowed files: PDF, DOC, DOCX, PPT, PPTX and TXT."
+      )
+      event.target.value = ""
+      setFile(null)
+      return
+    }
+
+    setFile(selectedFile)
   }
 
-  const selectedDateObject = new Date(`${selectedDate}T00:00:00`)
+  const handleUpload = async (event) => {
+    event.preventDefault()
 
-  const selectedDateLabel = selectedDateObject.toLocaleDateString(
-    "en-IN",
-    {
-      weekday: "long",
-      day: "numeric",
-      month: "long",
+    setError("")
+    setMessage("")
+
+    if (!user) {
+      setError("Please log in before uploading a resource.")
+      return
     }
-  )
 
-  const isToday = selectedDate === formatDateKey(today)
+    if (!title.trim()) {
+      setError("Please enter a resource title.")
+      return
+    }
 
-  const sortedSelectedTasks = [...selectedTasks].sort((a, b) => {
-    if (!a.start_time && !b.start_time) return 0
-    if (!a.start_time) return 1
-    if (!b.start_time) return -1
+    if (!subject.trim()) {
+      setError("Please enter the subject.")
+      return
+    }
 
-    return a.start_time.localeCompare(b.start_time)
-  })
+    if (!file) {
+      setError("Please select a file.")
+      return
+    }
+
+    if (file.size > MAX_FILE_SIZE) {
+      setError("File must be 10 MB or smaller.")
+      return
+    }
+
+    const extension = file.name
+      .split(".")
+      .pop()
+      ?.toLowerCase()
+
+    if (
+      !extension ||
+      !ALLOWED_EXTENSIONS.includes(extension)
+    ) {
+      setError(
+        "Allowed files: PDF, DOC, DOCX, PPT, PPTX and TXT."
+      )
+      return
+    }
+
+    setUploading(true)
+
+    let uploadedPath = ""
+
+    try {
+      const safeFileName = file.name
+        .replace(/[^a-zA-Z0-9._-]/g, "_")
+
+      uploadedPath = `${user.id}/${crypto.randomUUID()}-${safeFileName}`
+
+      const {
+        error: uploadError,
+      } = await supabase.storage
+        .from("resource-files")
+        .upload(uploadedPath, file, {
+          cacheControl: "3600",
+          upsert: false,
+          contentType: file.type || undefined,
+        })
+
+      if (uploadError) {
+        throw uploadError
+      }
+
+      const {
+        data: insertedResource,
+        error: insertError,
+      } = await supabase
+        .from("resources")
+        .insert({
+          user_id: user.id,
+          title: title.trim(),
+          description: description.trim(),
+          subject: subject.trim(),
+          resource_type: resourceType,
+          file_name: file.name,
+          file_path: uploadedPath,
+          file_size: file.size,
+          mime_type: file.type || "application/octet-stream",
+          downloads: 0,
+        })
+        .select(
+          "id, user_id, title, description, subject, resource_type, file_name, file_size, mime_type, downloads, created_at"
+        )
+        .single()
+
+      if (insertError) {
+        await supabase.storage
+          .from("resource-files")
+          .remove([uploadedPath])
+
+        throw insertError
+      }
+
+      setResources((current) => [
+        insertedResource,
+        ...current,
+      ])
+
+      resetUploadForm()
+      setShowUpload(false)
+      setMessage("Resource uploaded successfully.")
+    } catch (uploadError) {
+      console.error(
+        "Unable to upload resource:",
+        uploadError
+      )
+
+      setError(
+        uploadError?.message ||
+          "Unable to upload the resource."
+      )
+    } finally {
+      setUploading(false)
+    }
+  }
 
   if (loading) {
     return (
-      <main className="flex min-h-[calc(100vh-80px)] items-center justify-center bg-zinc-950 px-6">
-        <div className="text-center">
-          <div className="text-5xl">📅</div>
+      <main className="min-h-[calc(100vh-80px)] bg-zinc-950 px-6 py-12 text-white">
+        <div className="mx-auto max-w-7xl">
+          <div className="rounded-[2rem] border border-zinc-800 bg-zinc-900/60 p-12 text-center">
+            <div className="text-5xl">📚</div>
 
-          <p className="mt-4 text-sm text-zinc-500">
-            Loading your schedule...
-          </p>
+            <p className="mt-4 text-sm text-zinc-500">
+              Loading resources...
+            </p>
+          </div>
         </div>
       </main>
     )
   }
 
   return (
-    <main className="min-h-[calc(100vh-80px)] bg-zinc-950 px-4 py-8 sm:px-6 lg:px-8">
+    <main className="min-h-[calc(100vh-80px)] bg-zinc-950 px-4 py-8 text-white sm:px-6 lg:px-8">
       <div className="mx-auto max-w-7xl">
+
         {/* Header */}
 
         <section className="mb-8">
@@ -328,446 +376,326 @@ function Schedule() {
               </p>
 
               <h1 className="mt-2 text-4xl font-black tracking-tight sm:text-5xl">
-                Your Schedule
+                Resource Hub
               </h1>
 
               <p className="mt-3 max-w-2xl text-zinc-400">
-                See exactly what you need to study and when you need
-                to study it.
+                Find notes, question papers, lab manuals and study
+                material shared by students.
               </p>
             </div>
 
-            <div className="flex flex-wrap gap-3">
+            {user ? (
               <button
-                onClick={goToToday}
-                className="rounded-2xl border border-zinc-700 bg-zinc-900 px-5 py-3 text-sm font-bold text-zinc-200 transition hover:border-zinc-600 hover:bg-zinc-800"
-              >
-                Today
-              </button>
-
-              <Link
-                to="/planner"
+                type="button"
+                onClick={() => {
+                  setShowUpload((current) => !current)
+                  setError("")
+                  setMessage("")
+                }}
                 className="rounded-2xl bg-violet-500 px-5 py-3 text-sm font-bold text-white transition hover:bg-violet-400"
               >
-                📝 Edit Planner
-              </Link>
-            </div>
-          </div>
-        </section>
-
-        {/* Stats */}
-
-        <section className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <div className="rounded-3xl border border-zinc-800 bg-zinc-900/70 p-5">
-            <p className="text-sm text-zinc-500">This month</p>
-
-            <p className="mt-2 text-3xl font-black">
-              {monthTasks.length}
-            </p>
-
-            <p className="mt-1 text-xs text-zinc-600">
-              study sessions
-            </p>
-          </div>
-
-          <div className="rounded-3xl border border-zinc-800 bg-zinc-900/70 p-5">
-            <p className="text-sm text-zinc-500">Study time</p>
-
-            <p className="mt-2 text-3xl font-black">
-              {Math.floor(monthMinutes / 60)}h{" "}
-              {monthMinutes % 60}m
-            </p>
-
-            <p className="mt-1 text-xs text-zinc-600">
-              planned this month
-            </p>
-          </div>
-
-          <div className="rounded-3xl border border-zinc-800 bg-zinc-900/70 p-5">
-            <p className="text-sm text-zinc-500">Completed</p>
-
-            <p className="mt-2 text-3xl font-black">
-              {monthCompletedTasks}
-            </p>
-
-            <p className="mt-1 text-xs text-zinc-600">
-              sessions finished
-            </p>
-          </div>
-
-          <div className="rounded-3xl border border-zinc-800 bg-zinc-900/70 p-5">
-            <p className="text-sm text-zinc-500">
-              Progress
-            </p>
-
-            <p className="mt-2 text-3xl font-black">
-              {monthMinutes > 0
-                ? Math.round(
-                    (monthCompletedMinutes / monthMinutes) * 100
-                  )
-                : 0}
-              %
-            </p>
-
-            <p className="mt-1 text-xs text-zinc-600">
-              study time completed
-            </p>
-          </div>
-        </section>
-
-        {/* Filters */}
-
-        <section className="mb-6 flex flex-wrap items-center gap-3">
-          <span className="text-sm font-semibold text-zinc-500">
-            Filter:
-          </span>
-
-          <button
-            onClick={() => setFilter("All")}
-            className={`rounded-full px-4 py-2 text-sm font-bold transition ${
-              filter === "All"
-                ? "bg-violet-500 text-white"
-                : "border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-white"
-            }`}
-          >
-            All
-          </button>
-
-          {subjects.map((subject) => (
-            <button
-              key={subject}
-              onClick={() => setFilter(subject)}
-              className={`rounded-full px-4 py-2 text-sm font-bold transition ${
-                filter === subject
-                  ? "bg-violet-500 text-white"
-                  : "border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-white"
-              }`}
-            >
-              {subject}
-            </button>
-          ))}
-        </section>
-
-        {/* Main layout */}
-
-        <div className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
-          {/* Calendar */}
-
-          <section className="rounded-[2rem] border border-zinc-800 bg-zinc-900/70 p-5 sm:p-7">
-            <div className="mb-6 flex items-center justify-between">
-              <div>
-                <p className="text-sm text-zinc-500">
-                  Calendar
-                </p>
-
-                <h2 className="text-2xl font-black">
-                  {MONTHS[currentMonth.getMonth()]}{" "}
-                  {currentMonth.getFullYear()}
-                </h2>
-              </div>
-
-              <div className="flex gap-2">
-                <button
-                  onClick={() => changeMonth(-1)}
-                  className="flex h-10 w-10 items-center justify-center rounded-xl border border-zinc-700 bg-zinc-950 text-lg text-zinc-300 hover:bg-zinc-800"
-                >
-                  ←
-                </button>
-
-                <button
-                  onClick={() => changeMonth(1)}
-                  className="flex h-10 w-10 items-center justify-center rounded-xl border border-zinc-700 bg-zinc-950 text-lg text-zinc-300 hover:bg-zinc-800"
-                >
-                  →
-                </button>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-7 gap-2">
-              {DAYS.map((day) => (
-                <div
-                  key={day}
-                  className="pb-2 text-center text-[10px] font-bold uppercase tracking-wider text-zinc-600 sm:text-xs"
-                >
-                  {day.slice(0, 3)}
-                </div>
-              ))}
-
-              {calendarCells.map((date, index) => {
-                if (!date) {
-                  return (
-                    <div
-                      key={`blank-${index}`}
-                      className="min-h-[84px]"
-                    />
-                  )
-                }
-
-                const key = formatDateKey(date)
-                const dayTasks = tasksByDate[key] || []
-
-                const completed = dayTasks.filter(
-                  (task) => task.completed
-                ).length
-
-                const allComplete =
-                  dayTasks.length > 0 &&
-                  completed === dayTasks.length
-
-                const selected = key === selectedDate
-                const todayDate = key === formatDateKey(today)
-
-                return (
-                  <button
-                    key={key}
-                    onClick={() => selectDate(date)}
-                    className={`min-h-[84px] rounded-2xl border p-2 text-left transition ${
-                      selected
-                        ? "border-violet-500 bg-violet-500/10"
-                        : "border-zinc-800 bg-zinc-950/60 hover:border-zinc-700"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span
-                        className={`text-sm font-bold ${
-                          todayDate
-                            ? "text-violet-400"
-                            : "text-zinc-300"
-                        }`}
-                      >
-                        {date.getDate()}
-                      </span>
-
-                      {todayDate && (
-                        <span className="text-[9px] font-bold uppercase text-violet-400">
-                          Today
-                        </span>
-                      )}
-                    </div>
-
-                    {dayTasks.length > 0 && (
-                      <div className="mt-4">
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={`h-2 w-2 rounded-full ${
-                              allComplete
-                                ? "bg-emerald-400"
-                                : "bg-violet-400"
-                            }`}
-                          />
-
-                          <span className="text-xs font-semibold text-zinc-500">
-                            {completed}/{dayTasks.length}
-                          </span>
-                        </div>
-
-                        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-zinc-800">
-                          <div
-                            className="h-full rounded-full bg-violet-500 transition-all"
-                            style={{
-                              width: `${
-                                dayTasks.length
-                                  ? (completed / dayTasks.length) * 100
-                                  : 0
-                              }%`,
-                            }}
-                          />
-                        </div>
-                      </div>
-                    )}
-                  </button>
-                )
-              })}
-            </div>
-          </section>
-
-          {/* Day timeline */}
-
-          <section className="rounded-[2rem] border border-zinc-800 bg-zinc-900/70 p-5 sm:p-7">
-            <div className="mb-6">
-              <p className="text-sm text-zinc-500">
-                {isToday ? "Today" : "Selected day"}
-              </p>
-
-              <h2 className="mt-1 text-2xl font-black">
-                {selectedDateLabel}
-              </h2>
-
-              <p className="mt-2 text-sm text-zinc-500">
-                {selectedTasks.length} study session
-                {selectedTasks.length === 1 ? "" : "s"} ·{" "}
-                {selectedTotalMinutes} minutes planned
-              </p>
-            </div>
-
-            {selectedTasks.length === 0 ? (
-              <div className="flex min-h-[320px] flex-col items-center justify-center rounded-3xl border border-dashed border-zinc-700 bg-zinc-950/50 p-8 text-center">
-                <div className="text-5xl">🌿</div>
-
-                <h3 className="mt-5 text-xl font-bold">
-                  No study sessions
-                </h3>
-
-                <p className="mt-2 max-w-sm text-sm leading-6 text-zinc-500">
-                  Nothing is planned for this day. Use the Planner
-                  to create study sessions.
-                </p>
-
-                <Link
-                  to="/planner"
-                  className="mt-5 rounded-2xl bg-violet-500 px-5 py-3 text-sm font-bold text-white hover:bg-violet-400"
-                >
-                  Create Study Plan
-                </Link>
-              </div>
+                {showUpload
+                  ? "✕ Close Upload"
+                  : "＋ Upload Resource"}
+              </button>
             ) : (
-              <>
-                <div className="mb-6 rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-zinc-500">
-                      Day progress
-                    </span>
+              <Link
+                to="/login"
+                className="rounded-2xl bg-violet-500 px-5 py-3 text-center text-sm font-bold text-white transition hover:bg-violet-400"
+              >
+                Login to Upload
+              </Link>
+            )}
+          </div>
+        </section>
 
-                    <span className="font-bold text-white">
-                      {selectedCompletedCount}/
-                      {selectedTasks.length}
-                    </span>
-                  </div>
+        {/* Messages */}
 
-                  <div className="mt-3 h-2 overflow-hidden rounded-full bg-zinc-800">
-                    <div
-                      className="h-full rounded-full bg-violet-500 transition-all"
-                      style={{
-                        width: `${
-                          selectedTasks.length
-                            ? (selectedCompletedCount /
-                                selectedTasks.length) *
-                              100
-                            : 0
-                        }%`,
-                      }}
-                    />
-                  </div>
-                </div>
+        {(error || message) && (
+          <section className="mb-6">
+            {error && (
+              <div className="rounded-2xl border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-300">
+                {error}
+              </div>
+            )}
 
-                <div className="space-y-3">
-                  {sortedSelectedTasks.map((task) => (
-                    <div
-                      key={task.id}
-                      className={`rounded-2xl border p-4 transition ${
-                        task.completed
-                          ? "border-emerald-500/20 bg-emerald-500/5"
-                          : "border-zinc-800 bg-zinc-950"
-                      }`}
-                    >
-                      <div className="flex gap-4">
-                        <button
-                          onClick={() => toggleTask(task)}
-                          disabled={saving}
-                          className={`mt-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs font-bold transition ${
-                            task.completed
-                              ? "border-emerald-400 bg-emerald-400 text-zinc-950"
-                              : "border-zinc-600 bg-transparent text-transparent hover:border-violet-400"
-                          }`}
-                        >
-                          ✓
-                        </button>
-
-                        <div className="min-w-0 flex-1">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="text-xs font-bold text-violet-400">
-                              {formatTimeRange(
-                                task.start_time,
-                                task.end_time
-                              )}
-                            </span>
-
-                            <span
-                              className={`rounded-full border px-2.5 py-1 text-[10px] font-bold ${getPriorityClass(
-                                task.priority
-                              )}`}
-                            >
-                              {task.priority}
-                            </span>
-                          </div>
-
-                          <h3
-                            className={`mt-2 font-bold ${
-                              task.completed
-                                ? "text-zinc-500 line-through"
-                                : "text-white"
-                            }`}
-                          >
-                            {task.task_title}
-                          </h3>
-
-                          <div className="mt-2 flex flex-wrap gap-3 text-xs text-zinc-500">
-                            <span>📚 {task.subject}</span>
-                            <span>
-                              ⏱ {task.duration_minutes} min
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </>
+            {message && (
+              <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-3 text-sm text-emerald-300">
+                {message}
+              </div>
             )}
           </section>
-        </div>
+        )}
 
-        {/* Bottom links */}
+        {/* Upload form */}
 
-        <section className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          <Link
-            to="/dashboard"
-            className="rounded-3xl border border-zinc-800 bg-zinc-900/70 p-5 transition hover:-translate-y-1 hover:border-violet-500/40"
-          >
-            <p className="text-2xl">📊</p>
+        {showUpload && user && (
+          <section className="mb-8 rounded-[2rem] border border-violet-500/20 bg-violet-500/5 p-5 sm:p-7">
+            <div className="mb-6">
+              <p className="text-xs font-bold uppercase tracking-[0.2em] text-violet-400">
+                Share with students
+              </p>
 
-            <h3 className="mt-3 font-bold">
-              Back to Dashboard
-            </h3>
+              <h2 className="mt-2 text-2xl font-black">
+                Upload a Resource
+              </h2>
 
-            <p className="mt-1 text-sm text-zinc-500">
-              See your overall progress and activity.
-            </p>
-          </Link>
+              <p className="mt-2 text-sm leading-6 text-zinc-500">
+                Maximum file size is 10 MB. Supported formats:
+                PDF, DOC, DOCX, PPT, PPTX and TXT.
+              </p>
+            </div>
 
-          <Link
-            to="/planner"
-            className="rounded-3xl border border-zinc-800 bg-zinc-900/70 p-5 transition hover:-translate-y-1 hover:border-violet-500/40"
-          >
-            <p className="text-2xl">📝</p>
+            <form
+              onSubmit={handleUpload}
+              className="grid gap-5 lg:grid-cols-2"
+            >
+              <div>
+                <label className="text-sm font-semibold text-zinc-300">
+                  Title
+                </label>
 
-            <h3 className="mt-3 font-bold">
-              Change Study Plan
-            </h3>
+                <input
+                  type="text"
+                  value={title}
+                  onChange={(event) =>
+                    setTitle(event.target.value)
+                  }
+                  placeholder="Example: Computer Networks Unit 1 Notes"
+                  className="mt-2 w-full rounded-2xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm outline-none transition focus:border-violet-500"
+                />
+              </div>
 
-            <p className="mt-1 text-sm text-zinc-500">
-              Generate or update your study sessions.
-            </p>
-          </Link>
+              <div>
+                <label className="text-sm font-semibold text-zinc-300">
+                  Subject
+                </label>
 
-          <Link
-            to="/panic-mode"
-            className="rounded-3xl border border-zinc-800 bg-zinc-900/70 p-5 transition hover:-translate-y-1 hover:border-red-500/40"
-          >
-            <p className="text-2xl">🚨</p>
+                <input
+                  type="text"
+                  value={subject}
+                  onChange={(event) =>
+                    setSubject(event.target.value)
+                  }
+                  placeholder="Example: Computer Networks"
+                  className="mt-2 w-full rounded-2xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm outline-none transition focus:border-violet-500"
+                />
+              </div>
 
-            <h3 className="mt-3 font-bold">
-              Panic Mode
-            </h3>
+              <div>
+                <label className="text-sm font-semibold text-zinc-300">
+                  Resource Type
+                </label>
 
-            <p className="mt-1 text-sm text-zinc-500">
-              Get an emergency revision plan before an exam.
-            </p>
-          </Link>
+                <select
+                  value={resourceType}
+                  onChange={(event) =>
+                    setResourceType(event.target.value)
+                  }
+                  className="mt-2 w-full rounded-2xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm outline-none focus:border-violet-500"
+                >
+                  {RESOURCE_TYPES.map((type) => (
+                    <option key={type} value={type}>
+                      {type}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="text-sm font-semibold text-zinc-300">
+                  File
+                </label>
+
+                <input
+                  type="file"
+                  accept=".pdf,.doc,.docx,.ppt,.pptx,.txt"
+                  onChange={handleFileChange}
+                  className="mt-2 block w-full rounded-2xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm text-zinc-400 file:mr-4 file:rounded-xl file:border-0 file:bg-violet-500 file:px-4 file:py-2 file:font-bold file:text-white"
+                />
+
+                {file && (
+                  <p className="mt-2 text-xs text-zinc-500">
+                    {file.name} · {formatFileSize(file.size)}
+                  </p>
+                )}
+              </div>
+
+              <div className="lg:col-span-2">
+                <label className="text-sm font-semibold text-zinc-300">
+                  Description
+                </label>
+
+                <textarea
+                  value={description}
+                  onChange={(event) =>
+                    setDescription(event.target.value)
+                  }
+                  rows={4}
+                  placeholder="Add a short description..."
+                  className="mt-2 w-full resize-none rounded-2xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm outline-none transition focus:border-violet-500"
+                />
+              </div>
+
+              <div className="lg:col-span-2">
+                <button
+                  type="submit"
+                  disabled={uploading}
+                  className="rounded-2xl bg-white px-6 py-3 font-bold text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {uploading
+                    ? "Uploading..."
+                    : "🚀 Upload Resource"}
+                </button>
+              </div>
+            </form>
+          </section>
+        )}
+
+        {/* Search + filters */}
+
+        <section className="mb-8 rounded-[2rem] border border-zinc-800 bg-zinc-900/60 p-5 sm:p-6">
+          <div className="grid gap-4 lg:grid-cols-[1fr_auto_auto]">
+            <input
+              type="search"
+              value={search}
+              onChange={(event) =>
+                setSearch(event.target.value)
+              }
+              placeholder="🔎 Search resources, subjects or files..."
+              className="w-full rounded-2xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm outline-none transition focus:border-violet-500"
+            />
+
+            <select
+              value={subjectFilter}
+              onChange={(event) =>
+                setSubjectFilter(event.target.value)
+              }
+              className="rounded-2xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm outline-none"
+            >
+              <option value="All">All Subjects</option>
+
+              {subjects.map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={typeFilter}
+              onChange={(event) =>
+                setTypeFilter(event.target.value)
+              }
+              className="rounded-2xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm outline-none"
+            >
+              <option value="All">All Types</option>
+
+              {RESOURCE_TYPES.map((type) => (
+                <option key={type} value={type}>
+                  {type}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="mt-4 text-sm text-zinc-500">
+            Showing{" "}
+            <span className="font-bold text-zinc-300">
+              {filteredResources.length}
+            </span>{" "}
+            resource
+            {filteredResources.length === 1 ? "" : "s"}
+          </div>
         </section>
+
+        {/* Resource list */}
+
+        {filteredResources.length === 0 ? (
+          <section className="rounded-[2rem] border border-dashed border-zinc-700 bg-zinc-900/30 p-12 text-center">
+            <div className="text-6xl">📭</div>
+
+            <h2 className="mt-5 text-2xl font-black">
+              No resources found
+            </h2>
+
+            <p className="mx-auto mt-3 max-w-lg text-sm leading-6 text-zinc-500">
+              Try another search or filter, or upload the first
+              resource for your classmates.
+            </p>
+          </section>
+        ) : (
+          <section className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
+            {filteredResources.map((resource) => (
+              <Link
+                key={resource.id}
+                to={`/resources/${resource.id}`}
+                className="group rounded-[2rem] border border-zinc-800 bg-zinc-900/60 p-5 transition duration-300 hover:-translate-y-1 hover:border-violet-500/40 hover:bg-zinc-900"
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-violet-500/10 text-3xl">
+                    {getFileIcon(
+                      resource.mime_type,
+                      resource.file_name
+                    )}
+                  </div>
+
+                  <span className="rounded-full border border-violet-500/20 bg-violet-500/5 px-3 py-1 text-[10px] font-bold uppercase tracking-wide text-violet-300">
+                    {resource.resource_type}
+                  </span>
+                </div>
+
+                <h2 className="mt-5 line-clamp-2 text-xl font-black transition group-hover:text-violet-300">
+                  {resource.title}
+                </h2>
+
+                <p className="mt-2 text-sm font-semibold text-violet-400">
+                  📚 {resource.subject}
+                </p>
+
+                {resource.description && (
+                  <p className="mt-3 line-clamp-3 text-sm leading-6 text-zinc-500">
+                    {resource.description}
+                  </p>
+                )}
+
+                <div className="mt-5 flex flex-wrap gap-3 text-xs text-zinc-600">
+                  <span>
+                    📄 {resource.file_name}
+                  </span>
+
+                  <span>
+                    💾 {formatFileSize(resource.file_size)}
+                  </span>
+
+                  <span>
+                    ⬇ {resource.downloads || 0}
+                  </span>
+                </div>
+
+                <div className="mt-5 flex items-center justify-between border-t border-zinc-800 pt-4">
+                  <span className="text-xs text-zinc-600">
+                    {formatDate(resource.created_at)}
+                  </span>
+
+                  <span className="text-sm font-bold text-zinc-300 transition group-hover:text-white">
+                    View →
+                  </span>
+                </div>
+              </Link>
+            ))}
+          </section>
+        )}
+
+        <div className="py-12 text-center">
+          <p className="text-sm text-zinc-600">
+            Share knowledge. Save someone from tomorrow's panic. 🚀
+          </p>
+        </div>
       </div>
     </main>
   )
 }
 
-export default Schedule
+export default Resources
